@@ -77,7 +77,7 @@ Discrete Action Selection
 ## Installation
 
 ```bash
-git clone https://github.com/yomama2311/vroom.git
+git clone https://github.com/phuvo05/vroom.git
 cd vroom/
 pip install -r dqn/requirements.txt
 ```
