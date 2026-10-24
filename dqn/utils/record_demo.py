@@ -15,7 +15,9 @@ FPS = 50
 
 env = CarRacingEnv(ENV_CONFIG)
 agent = DQNAgent(AGENT_CONFIG)
-agent.load(ckpt)
+import torch
+agent.policy_net.load_state_dict(torch.load(ckpt, map_location=agent.device)["policy_net"])  # works with full or stripped checkpoints
+agent.policy_net.eval()
 
 frames = []
 raw_step = env._env.step
