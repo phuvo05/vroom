@@ -8,6 +8,9 @@ ENV_CONFIG = {
     "frame_stack": 4,
     "skip_frames": 4,        # lặp action 4 lần mỗi step
     "render_mode": "rgb_array",
+    "scenario":    "classic",  # classic / forest / city / desert
+    "difficulty":  "normal",   # normal / hard (physical obstacle density)
+    "weather":     "dry",      # dry / rain (road grip + slippery patches)
 }
 
 # ── Agent ─────────────────────────────────────────────────────────────
@@ -18,7 +21,7 @@ AGENT_CONFIG = {
     "gamma":         0.99,
     "lr":            1e-4,
     "batch_size":    32,
-    "memory_size":   10_000,
+    "memory_size":   100_000,  # uint8 frames: ~5.6 GB at capacity
     "target_update": 1_000,
 
     "epsilon_start": 1.0,

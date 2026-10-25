@@ -1,368 +1,397 @@
-"""
-Demo UI cho CarRacing DQN
-Chạy: python demo_ui.py
-"""
-
+"""Interactive challenge demo. Run with .venv/Scripts/python.exe dqn/demo_ui.py."""
+from dataclasses import dataclass
+from pathlib import Path
+import queue
 import sys
-import os
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
-import numpy as np
+from tkinter import filedialog, ttk
+
 from PIL import Image, ImageTk
-import queue
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parents[1]
+BG, CARD, PANEL = "#0b1220", "#131f30", "#1b2b40"
+TEXT, MUTED, ACCENT, AMBER, RED = "#edf3fa", "#98abc1", "#57dbc2", "#ffc575", "#ff7d87"
+SCENES = {"Rừng cây": "forest", "Đô thị": "city", "Sa mạc": "desert", "Đường gốc": "classic"}
+LEVELS = {"Thường": "normal", "Khó": "hard"}
+ACTIONS = ["Thả trôi", "Rẽ trái", "Rẽ phải", "Tăng tốc", "Phanh"]
+REASONS = {"wrecked": "Xe hỏng", "stuck": "Mắc kẹt / lạc đường", "time_limit": "Hết thời gian",
+           "finished": "Hoàn thành", "out_of_bounds": "Ra ngoài bản đồ"}
 
-CHECKPOINT  = "checkpoints/best.pth"
-DISPLAY_W   = 420
-DISPLAY_H   = 420
 
-BG      = "#0A1628"
-CARD    = "#0F2744"
-NAVY    = "#0D2137"
-TEAL    = "#0891B2"
-TEAL_L  = "#22D3EE"
-WHITE   = "#FFFFFF"
-GRAY    = "#94A3B8"
-GRAY_L  = "#E2E8F0"
-GREEN   = "#10B981"
-AMBER   = "#F59E0B"
-RED     = "#EF4444"
+@dataclass(frozen=True)
+class Settings:
+    scenario: str
+    difficulty: str
+    weather: str
+    driver: str
+    seed: int
+    checkpoint: str
 
-ACTION_NAMES = ["Giữ nguyên", "Rẽ trái", "Rẽ phải", "Tăng tốc", "Phanh"]
+
+class Simulation(threading.Thread):
+    """Own all Gym/PyTorch objects here; only the main thread touches Tk."""
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.commands = queue.Queue()
+        self.events = queue.Queue()
+        self.frames = queue.Queue(maxsize=1)
+        self.stop_event = threading.Event()
+        self.env = self.agent = None
+        self.loaded_checkpoint = None
+        self.settings = None
+        self.paused = False
+        self.action = 0
+        self.episode = 0
+        self.next_reset = None
+
+    def _reset(self):
+        self.seed = self.settings.seed + self.episode
+        self.episode += 1
+        self.state = self.env.reset(seed=self.seed)
+        self.total, self.steps = 0., 0
+        self.next_reset = None
+        self.events.put(("reset", (self.env.map_data(), self.seed, self.episode)))
+        self._frame(self.env.last_info, 0., 0)
+
+    def _start_map(self, settings):
+        from environment.carracing_env import CarRacingEnv
+        from configs.config import ENV_CONFIG, AGENT_CONFIG
+        self.events.put(("status", "Đang tạo môi trường..."))
+        if self.env is not None:
+            self.env.close()
+            self.env = None
+        self.settings = settings
+        if settings.driver == "AI" and self.loaded_checkpoint != settings.checkpoint:
+            self.events.put(("status", "Đang tải model..."))
+            if not Path(settings.checkpoint).is_file():
+                raise FileNotFoundError("Không tìm thấy checkpoint. Chọn file .pth hoặc chuyển sang Tự lái.")
+            import torch
+            from agents.dqn_agent import DQNAgent
+            torch.set_num_threads(2)
+            agent = DQNAgent(AGENT_CONFIG)
+            agent.load(settings.checkpoint)
+            self.agent, self.loaded_checkpoint = agent, settings.checkpoint
+        self.env = CarRacingEnv({**ENV_CONFIG, "scenario": settings.scenario,
+                                 "difficulty": settings.difficulty, "weather": settings.weather})
+        self.paused, self.action, self.episode = False, 0, 0
+        self._reset()
+        self.events.put(("started", settings))
+
+    def _frame(self, info, reward, action):
+        payload = dict(info=info.copy(), reward=reward, total=self.total,
+                       step=self.steps, episode=self.episode, seed=self.seed,
+                       action=action, frame=self.env.render())
+        try:
+            self.frames.get_nowait()
+        except queue.Empty:
+            pass
+        self.frames.put_nowait(payload)
+
+    def run(self):
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    while True:
+                        command, value = self.commands.get_nowait()
+                        if command == "start":
+                            self._start_map(value)
+                        elif command == "pause":
+                            self.paused = value
+                        elif command == "action":
+                            self.action = value
+                except queue.Empty:
+                    pass
+                except Exception as error:
+                    if self.env is not None:
+                        self.env.close()
+                    self.env = None
+                    self.events.put(("error", str(error)))
+                if self.env is None or self.paused:
+                    self.stop_event.wait(.03)
+                    continue
+                if self.next_reset is not None:
+                    if time.monotonic() >= self.next_reset:
+                        self._reset()
+                    else:
+                        self.stop_event.wait(.03)
+                        continue
+                try:
+                    action = self.agent.select_action(self.state, training=False) if self.settings.driver == "AI" else self.action
+                    self.state, reward, done, info = self.env.step(action)
+                    self.steps += 1
+                    self.total += reward
+                    self._frame(info, reward, action)
+                    if done:
+                        self.events.put(("finished", (self.seed, self.total, info)))
+                        self.next_reset = time.monotonic() + 1.5
+                    # Four simulation frames at 50 Hz => about real-time playback.
+                    self.stop_event.wait(.06)
+                except Exception as error:
+                    self.env.close()
+                    self.env = None
+                    self.events.put(("error", str(error)))
+        finally:
+            if self.env is not None:
+                self.env.close()
 
 
 class DemoApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("CarRacing DQN — Demo")
-        self.root.configure(bg=BG)
-        self.root.resizable(False, False)
-
-        self.env        = None
-        self.agent      = None
-        self.running    = False
-        self.ready      = False
-        self.paused     = False
-        self.frame_q    = queue.Queue(maxsize=2)
-
-        self.ep_num     = 0
-        self.ep_step    = 0
-        self.ep_reward  = 0.0
-        self.ep_history = []   # [(ep, total_reward)]
-        self.cur_action = "-"
-
+        root.title("VROOM — Driving Challenge")
+        root.configure(bg=BG)
+        root.geometry("1120x820")
+        root.resizable(False, False)
+        self.worker = Simulation()
+        self.paused, self.started = False, False
+        self.keys = set()
+        self.map_transform = None
+        self.car_dot = None
         self._build_ui()
-        self._load_async()
+        self.worker.start()
+        root.protocol("WM_DELETE_WINDOW", self._close)
+        root.bind("<KeyPress>", self._key_down)
+        root.bind("<KeyRelease>", self._key_up)
+        root.bind("<FocusOut>", self._focus_out)
+        self._poll()
+        root.after(150, self._start)
 
-    # ──────────────────────────────────────────────────────────────────
-    # BUILD UI
-    # ──────────────────────────────────────────────────────────────────
+    def _label(self, parent, text="", *, color=TEXT, size=10, bold=False, **kwargs):
+        return tk.Label(parent, text=text, bg=parent.cget("bg"), fg=color,
+                        font=("Segoe UI", size, "bold" if bold else "normal"), **kwargs)
+
+    def _button(self, parent, text, command, primary=False):
+        return tk.Button(parent, text=text, command=command, bg=ACCENT if primary else PANEL,
+                         fg=BG if primary else TEXT, activebackground="#7ce6d2", relief="flat",
+                         font=("Segoe UI", 10, "bold"), padx=16, pady=8, cursor="hand2")
+
     def _build_ui(self):
-        # Top accent bar
-        tk.Frame(self.root, bg=TEAL, height=4).pack(fill="x")
-
-        # Header
-        hdr = tk.Frame(self.root, bg=BG, padx=20, pady=10)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text="Self-Driving Car", font=("Arial", 20, "bold"),
-                 bg=BG, fg=WHITE).pack(side="left")
-        tk.Label(hdr, text="  DQN Demo", font=("Arial", 13),
-                 bg=BG, fg=TEAL_L).pack(side="left")
-
-        # Body
-        body = tk.Frame(self.root, bg=BG, padx=20, pady=16)
-        body.pack(fill="both")
-
-        # ── LEFT: canvas ──────────────────────────────────────────────
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL, foreground=TEXT,
+                        arrowcolor=ACCENT, bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL,
+                        borderwidth=0, padding=5)
+        style.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", TEXT)])
+        style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT,
+                        borderwidth=0, rowheight=25, font=("Segoe UI", 9))
+        style.configure("Treeview.Heading", background=PANEL, foreground=MUTED, font=("Segoe UI", 9))
+        tk.Frame(self.root, bg=ACCENT, height=3).pack(fill="x")
+        header = tk.Frame(self.root, bg=BG, padx=24, pady=12)
+        header.pack(fill="x")
+        self._label(header, "VROOM", size=24, bold=True).pack(side="left")
+        self._label(header, "  /  DRIVING CHALLENGE", color=ACCENT, size=12).pack(side="left", pady=(6, 0))
+        self._label(header, "Vật cản thật · Va chạm · Độ bám đường", color=MUTED).pack(side="right", pady=(8, 0))
+        controls = tk.Frame(self.root, bg=CARD, padx=16, pady=12)
+        controls.pack(fill="x", padx=24)
+        self.scene = tk.StringVar(value="Rừng cây")
+        self.level = tk.StringVar(value="Thường")
+        self.driver = tk.StringVar(value="AI")
+        self.seed_var = tk.StringVar(value="42")
+        self.rain = tk.BooleanVar(value=False)
+        self.checkpoint = str(ROOT / "checkpoints" / "best.pth")
+        for title, variable, values, width in [("BỐI CẢNH", self.scene, list(SCENES), 13),
+                                               ("ĐỘ KHÓ", self.level, list(LEVELS), 9),
+                                               ("ĐIỀU KHIỂN", self.driver, ["AI", "Tự lái"], 10)]:
+            group = tk.Frame(controls, bg=CARD)
+            group.pack(side="left", padx=(0, 16))
+            self._label(group, title, color=MUTED, size=8, bold=True).pack(anchor="w", pady=(0, 4))
+            ttk.Combobox(group, textvariable=variable, values=values, state="readonly", width=width).pack()
+        group = tk.Frame(controls, bg=CARD)
+        group.pack(side="left", padx=(0, 12))
+        self._label(group, "MAP SEED", color=MUTED, size=8, bold=True).pack(anchor="w", pady=(0, 4))
+        tk.Entry(group, textvariable=self.seed_var, width=9, bg=PANEL, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Segoe UI", 11)).pack(ipady=6)
+        tk.Checkbutton(controls, text="Mưa / đường trơn", variable=self.rain, bg=CARD, fg=TEXT,
+                       selectcolor=PANEL, activebackground=CARD, activeforeground=TEXT,
+                       font=("Segoe UI", 10)).pack(side="left", padx=4, pady=(16, 0))
+        self._button(controls, "Chạy map", self._start, True).pack(side="right", pady=(12, 0))
+        model_row = tk.Frame(self.root, bg=BG, padx=24, pady=8)
+        model_row.pack(fill="x")
+        self.model_label = self._label(model_row, "Model: best.pth · Model gốc chưa được huấn luyện né vật cản", color=AMBER, size=9)
+        self.model_label.pack(side="left")
+        tk.Button(model_row, text="Chọn model .pth", command=self._choose_model, bg=BG, fg=ACCENT,
+                  relief="flat", font=("Segoe UI", 9), cursor="hand2").pack(side="right")
+        body = tk.Frame(self.root, bg=BG, padx=24)
+        body.pack(fill="both", expand=True)
         left = tk.Frame(body, bg=BG)
-        left.pack(side="left", padx=(0,14))
-
-        canvas_border = tk.Frame(left, bg=TEAL, padx=2, pady=2)
-        canvas_border.pack()
-        self.canvas = tk.Canvas(canvas_border, width=DISPLAY_W, height=DISPLAY_H,
-                                bg="#000000", highlightthickness=0)
+        left.pack(side="left", anchor="n", padx=(0, 18))
+        self.canvas = tk.Canvas(left, width=720, height=480, bg="#070d15", highlightthickness=1,
+                                highlightbackground="#294258", takefocus=True)
         self.canvas.pack()
-
-        # Status bar
-        self.status_var = tk.StringVar(value="⏳  Đang tải model và môi trường...")
-        tk.Frame(left, bg=NAVY, pady=6).pack(fill="x", pady=(6,0))
-        status_frame = tk.Frame(left, bg=NAVY, pady=6)
-        status_frame.pack(fill="x")
-        tk.Label(status_frame, textvariable=self.status_var, font=("Arial", 11),
-                 bg=NAVY, fg=TEAL_L, padx=12).pack()
-
-        # Control buttons
-        btn_frame = tk.Frame(left, bg=BG, pady=8)
-        btn_frame.pack(fill="x")
-
-        self.btn_pause = tk.Button(
-            btn_frame, text="⏸  Tạm dừng", font=("Arial", 11, "bold"),
-            bg=AMBER, fg=WHITE, activebackground="#D97706",
-            relief="flat", cursor="hand2", pady=8,
-            command=self._toggle_pause, state="disabled"
-        )
-        self.btn_pause.pack(side="left", fill="x", expand=True, padx=(0,6))
-
-        self.btn_stop = tk.Button(
-            btn_frame, text="■  Dừng hẳn", font=("Arial", 11, "bold"),
-            bg=RED, fg=WHITE, activebackground="#DC2626",
-            relief="flat", cursor="hand2", pady=8,
-            command=self._stop, state="disabled"
-        )
-        self.btn_stop.pack(side="left", fill="x", expand=True)
-
-        # ── RIGHT: stats + history ─────────────────────────────────────
-        right = tk.Frame(body, bg=BG, width=230)
-        right.pack(side="left", fill="y")
-        right.pack_propagate(False)
-
-        # Live stats
-        tk.Label(right, text="LIVE", font=("Arial", 9, "bold"),
-                 bg=BG, fg=GRAY).pack(anchor="w", pady=(0,4))
-
-        self.stat_vars = {}
-        items = [
-            ("ep",      "Episode",        WHITE),
-            ("step",    "Step",           WHITE),
-            ("reward",  "Reward (step)",  AMBER),
-            ("total",   "Total reward",   GREEN),
-            ("action",  "Action",         TEAL_L),
-        ]
-        for key, label, color in items:
-            card = tk.Frame(right, bg=CARD, padx=10, pady=6)
-            card.pack(fill="x", pady=2)
-            tk.Label(card, text=label, font=("Arial", 9),
-                     bg=CARD, fg=GRAY).pack(anchor="w")
+        self.canvas.create_text(360, 240, text="Đang tạo đường đua...", fill=MUTED, font=("Segoe UI", 15))
+        self.image_item = None
+        self.canvas.bind("<Button-1>", lambda e: self.canvas.focus_set())
+        self.status = tk.StringVar(value="Đang khởi động...")
+        tk.Label(left, textvariable=self.status, bg=CARD, fg=ACCENT, font=("Segoe UI", 10),
+                 wraplength=690, justify="left", anchor="w", padx=12, pady=10).pack(fill="x", pady=(8, 0))
+        buttons = tk.Frame(left, bg=BG, pady=10)
+        buttons.pack(fill="x")
+        self.pause_btn = self._button(buttons, "Tạm dừng", self._pause)
+        self.pause_btn.pack(side="left")
+        self._button(buttons, "Map tiếp theo", self._next).pack(side="left", padx=8)
+        self._label(buttons, "↑ / W ga    ← → / A D rẽ    Space phanh", color=MUTED, size=9).pack(side="right")
+        right = tk.Frame(body, bg=BG, width=310)
+        right.pack(side="left", fill="both", expand=True)
+        self._label(right, "TELEMETRY", color=MUTED, size=9, bold=True).pack(anchor="w", pady=(0, 6))
+        cards = tk.Frame(right, bg=BG)
+        cards.pack(fill="x")
+        cards.columnconfigure((0, 1), weight=1)
+        self.stats = {}
+        for i, (key, title, color) in enumerate([("speed", "TỐC ĐỘ · km/h", TEXT), ("progress", "ĐƯỜNG ĐÃ ĐI", ACCENT),
+                                                ("damage", "HƯ HẠI", RED), ("hits", "VA CHẠM", AMBER),
+                                                ("reward", "TỔNG REWARD", TEXT), ("action", "HÀNH ĐỘNG", ACCENT)]):
+            card = tk.Frame(cards, bg=CARD, padx=10, pady=6)
+            card.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 6), pady=(0, 6))
+            self._label(card, title, color=MUTED, size=8).pack(anchor="w")
             var = tk.StringVar(value="—")
-            tk.Label(card, textvariable=var, font=("Arial", 15, "bold"),
-                     bg=CARD, fg=color).pack(anchor="w")
-            self.stat_vars[key] = var
+            tk.Label(card, textvariable=var, bg=CARD, fg=color, font=("Segoe UI", 14, "bold")).pack(anchor="w")
+            self.stats[key] = var
+        self.map_label = self._label(right, "BẢN ĐỒ · chấm cam = vật cản", color=MUTED, size=9, bold=True)
+        self.map_label.pack(anchor="w", pady=(8, 6))
+        self.minimap = tk.Canvas(right, width=290, height=120, bg=CARD, highlightthickness=0)
+        self.minimap.pack(fill="x")
+        self.run_label = self._label(right, "Seed 42 · Episode 1", color=MUTED, size=9)
+        self.run_label.pack(anchor="w", pady=6)
+        self._label(right, "LƯỢT VỪA CHẠY", color=MUTED, size=9, bold=True).pack(anchor="w", pady=(6, 5))
+        self.history = ttk.Treeview(right, columns=("seed", "reward", "hits"), show="headings", height=3)
+        for key, title, width in [("seed", "Seed", 60), ("reward", "Reward", 95), ("hits", "Va chạm", 75)]:
+            self.history.heading(key, text=title)
+            self.history.column(key, width=width, anchor="center")
+        self.history.pack(fill="x")
+        self._label(right, "Cam: rào chắn · Xanh: xe đỗ\nNâu: thùng hàng · Mưa giảm độ bám\nVa chạm −80 điểm · Hỏng 100% kết thúc", color=MUTED, size=9,
+                    justify="left").pack(anchor="w", pady=(10, 0))
 
-        # Episode history
-        tk.Label(right, text="LỊCH SỬ EPISODE", font=("Arial", 9, "bold"),
-                 bg=BG, fg=GRAY).pack(anchor="w", pady=(12,4))
+    def _settings(self):
+        seed = int(self.seed_var.get())
+        if not 0 <= seed <= 2**32 - 1:
+            raise ValueError("Seed phải nằm trong khoảng 0 đến 4294967295.")
+        return Settings(SCENES[self.scene.get()], LEVELS[self.level.get()],
+                        "rain" if self.rain.get() else "dry", self.driver.get(), seed, self.checkpoint)
 
-        hist_frame = tk.Frame(right, bg=CARD, padx=8, pady=6)
-        hist_frame.pack(fill="both", expand=True)
-
-        # Header row
-        hrow = tk.Frame(hist_frame, bg=CARD)
-        hrow.pack(fill="x")
-        tk.Label(hrow, text="Ep", width=4, font=("Arial", 9, "bold"),
-                 bg=CARD, fg=GRAY, anchor="w").pack(side="left")
-        tk.Label(hrow, text="Reward", font=("Arial", 9, "bold"),
-                 bg=CARD, fg=GRAY, anchor="w").pack(side="left", padx=(8,0))
-        tk.Label(hrow, text="Steps", font=("Arial", 9, "bold"),
-                 bg=CARD, fg=GRAY, anchor="e").pack(side="right")
-
-        tk.Frame(hist_frame, bg=TEAL, height=1).pack(fill="x", pady=4)
-
-        # Scrollable listbox
-        self.hist_list = tk.Listbox(
-            hist_frame, bg=CARD, fg=GRAY_L, font=("Courier New", 10),
-            selectbackground=NAVY, relief="flat", highlightthickness=0,
-            height=8, activestyle="none"
-        )
-        self.hist_list.pack(fill="both", expand=True)
-
-        # Best reward label
-        self.best_var = tk.StringVar(value="Best: —")
-        tk.Label(right, textvariable=self.best_var, font=("Arial", 10, "bold"),
-                 bg=BG, fg=GREEN).pack(anchor="w", pady=(6,0))
-
-        # Draw placeholder
-        self._draw_placeholder("⏳ Đang tải...")
-        self._update_ui()
-
-    def _draw_placeholder(self, msg=""):
-        self.canvas.delete("all")
-        self.canvas.create_rectangle(0, 0, DISPLAY_W, DISPLAY_H, fill="#000000")
-        self.canvas.create_text(DISPLAY_W//2, DISPLAY_H//2 - 20,
-                                text="🚗", font=("Arial", 48), fill=TEAL)
-        if msg:
-            self.canvas.create_text(DISPLAY_W//2, DISPLAY_H//2 + 40,
-                                    text=msg, font=("Arial", 12), fill=GRAY)
-
-    # ──────────────────────────────────────────────────────────────────
-    # LOAD MODEL + ENV
-    # ──────────────────────────────────────────────────────────────────
-    def _load_async(self):
-        def _load():
-            try:
-                from environment.carracing_env import CarRacingEnv
-                from agents.dqn_agent import DQNAgent
-                from configs.config import ENV_CONFIG, AGENT_CONFIG
-
-                self.status_var.set("⏳  Khởi động môi trường...")
-                cfg = {**ENV_CONFIG, "render_mode": "rgb_array"}
-                self.env = CarRacingEnv(cfg)
-
-                self.status_var.set("⏳  Tải model...")
-                self.agent = DQNAgent(AGENT_CONFIG)
-
-                if os.path.exists(CHECKPOINT):
-                    self.agent.load(CHECKPOINT)
-                    self.status_var.set("✅  Sẵn sàng — đang chạy tự động...")
-                else:
-                    self.status_var.set("⚠️  Không tìm thấy checkpoint!")
-                    return
-
-                self.ready = True
-                # Tự động bắt đầu chạy luôn
-                self.root.after(0, self._start_auto)
-
-            except Exception as e:
-                self.status_var.set(f"❌  Lỗi: {str(e)[:60]}")
-
-        threading.Thread(target=_load, daemon=True).start()
-
-    # ──────────────────────────────────────────────────────────────────
-    # DEMO LOOP — tự động chạy episode liên tục
-    # ──────────────────────────────────────────────────────────────────
-    def _start_auto(self):
-        self.running = True
-        self.btn_pause.config(state="normal")
-        self.btn_stop.config(state="normal")
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def _loop(self):
-        """Chạy episode liên tục cho đến khi bị dừng."""
-        while self.running:
-            self._run_one_episode()
-            if self.running:
-                time.sleep(0.5)  # nghỉ ngắn giữa các episode
-
-    def _run_one_episode(self):
-        self.ep_num    += 1
-        self.ep_step    = 0
-        self.ep_reward  = 0.0
-        self._ep_total  = 0.0  
-        ep_steps_total  = 0
-
-        self.root.after(0, lambda ep=self.ep_num:
-            self.status_var.set(f"▶  Episode {ep} đang chạy..."))
-
-        state = self.env.reset()
-
-        while self.running:
-            # Tạm dừng
-            while self.paused and self.running:
-                time.sleep(0.1)
-
-            action = self.agent.select_action(state, training=False)
-            next_state, reward, done, _ = self.env.step(action)
-
-            self.ep_step    = ep_steps_total + 1
-            self.ep_reward  = reward
-            self._ep_total += reward  
-            self.cur_action = ACTION_NAMES[action]
-            ep_steps_total += 1
-
-            # Lấy frame để render
-            raw = self.env._env.render()
-            if raw is not None:
-                try:
-                    self.frame_q.put_nowait(raw)
-                except queue.Full:
-                    pass
-
-            state = next_state
-            time.sleep(0.025)
-
-            if done:
-                break
-
-        # Episode kết thúc — lưu lịch sử
-        total = sum([self.ep_reward]) if ep_steps_total == 1 else self.ep_reward
-        # Tính tổng thật bằng cách lấy từ env trực tiếp
-        self._record_episode(self.ep_num, ep_steps_total)
-
-    def _record_episode(self, ep, steps):
-        """Không có total reward riêng nên tính từ stat_vars."""
-        # Đọc total từ label
+    def _start(self):
         try:
-            total = float(self.stat_vars["total"].get())
-        except Exception:
-            total = 0.0
+            settings = self._settings()
+        except ValueError as error:
+            self.status.set(str(error))
+            return
+        self.started, self.paused = False, False
+        self.pause_btn.config(text="Tạm dừng")
+        self.keys.clear()
+        self.worker.commands.put(("start", settings))
+        self.status.set("Đang tải map...")
+        self.canvas.focus_set()
 
-        self.ep_history.append((ep, total, steps))
+    def _choose_model(self):
+        path = filedialog.askopenfilename(title="Chọn checkpoint", initialdir=ROOT / "checkpoints",
+                                          filetypes=[("PyTorch checkpoint", "*.pth *.pt")])
+        if path:
+            self.checkpoint = path
+            self.model_label.config(text=f"Model: {Path(path).name} · Chỉ chọn model cùng kiến trúc 5 hành động")
+            self._start()
 
-        # Update history list
-        def _update():
-            color = GREEN if total >= 0 else RED
-            line = f"#{ep:>3}  {total:>+8.1f}  {steps:>5} steps"
-            self.hist_list.insert(0, line)  # mới nhất ở trên
-            self.hist_list.itemconfig(0, fg=GREEN if total >= 0 else "#F87171")
+    def _pause(self):
+        if self.started:
+            self.paused = not self.paused
+            self.worker.commands.put(("pause", self.paused))
+            self.pause_btn.config(text="Tiếp tục" if self.paused else "Tạm dừng")
+            self.status.set("Đã tạm dừng" if self.paused else "Đang chạy...")
 
-            # Best reward
-            best = max(self.ep_history, key=lambda x: x[1])
-            self.best_var.set(f"Best: Ep#{best[0]}  {best[1]:+.1f}")
-
-            self.status_var.set(
-                f"✅  Episode {ep} xong — reward {total:+.1f} | Ep tiếp theo đang chuẩn bị..."
-            )
-        self.root.after(0, _update)
-
-    # ──────────────────────────────────────────────────────────────────
-    # CONTROLS
-    # ──────────────────────────────────────────────────────────────────
-    def _toggle_pause(self):
-        self.paused = not self.paused
-        if self.paused:
-            self.btn_pause.config(text="▶  Tiếp tục")
-            self.status_var.set("⏸  Đã tạm dừng")
-        else:
-            self.btn_pause.config(text="⏸  Tạm dừng")
-            self.status_var.set("▶  Đang chạy tiếp...")
-
-    def _stop(self):
-        self.running = False
-        self.paused  = False
-        self.btn_pause.config(state="disabled", text="⏸  Tạm dừng")
-        self.btn_stop.config(state="disabled")
-        self.status_var.set("⏹  Đã dừng.")
-
-    # ──────────────────────────────────────────────────────────────────
-    # UI UPDATE LOOP (~30 FPS)
-    # ──────────────────────────────────────────────────────────────────
-    def _update_ui(self):
-        # Update stats
-        if self.running and not self.paused:
-            self.stat_vars["ep"].set(str(self.ep_num))
-            self.stat_vars["step"].set(str(self.ep_step))
-            self.stat_vars["reward"].set(f"{self.ep_reward:+.2f}")
-            self.stat_vars["action"].set(self.cur_action)
-
-            # Tính total reward từ đầu episode
-            self.stat_vars["total"].set(f"{self._ep_total:.1f}")
-
-        # Nếu episode mới bắt đầu thì reset total
-        if not hasattr(self, "_last_ep"):
-            self._last_ep = 0
-        if self.ep_num != self._last_ep:
-            self._ep_total = 0.0
-            self._last_ep = self.ep_num
-
-        # Update game frame
+    def _next(self):
         try:
-            frame = self.frame_q.get_nowait()
-            img = Image.fromarray(frame).resize(
-                (DISPLAY_W, DISPLAY_H), Image.NEAREST)
-            photo = ImageTk.PhotoImage(img)
-            self.canvas.create_image(0, 0, anchor="nw", image=photo)
-            self.canvas._photo = photo
+            self.seed_var.set(str(int(self.seed_var.get()) + 1))
+        except ValueError:
+            self.seed_var.set("42")
+        self._start()
+
+    def _key_down(self, event):
+        if event.widget.winfo_class() in ("Entry", "TCombobox"):
+            return
+        self.keys.add(event.keysym.lower())
+        self._send_keys()
+
+    def _key_up(self, event):
+        self.keys.discard(event.keysym.lower())
+        self._send_keys()
+
+    def _focus_out(self, event):
+        self.keys.clear()
+        self.worker.commands.put(("action", 0))
+
+    def _send_keys(self):
+        keys = self.keys
+        action = 4 if keys & {"space", "down", "s"} else 1 if keys & {"left", "a"} else 2 if keys & {"right", "d"} else 3 if keys & {"up", "w"} else 0
+        self.worker.commands.put(("action", action))
+
+    def _draw_map(self, data):
+        self.minimap.delete("all")
+        points = data["track"]
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
+        scale = min(260 / max(max(xs) - min(xs), 1), 95 / max(max(ys) - min(ys), 1))
+        mid_x, mid_y = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+        self.map_transform = lambda p: (145 + (p[0] - mid_x) * scale, 60 - (p[1] - mid_y) * scale)
+        coords = [v for p in points + [points[0]] for v in self.map_transform(p)]
+        self.minimap.create_line(*coords, fill="#5d7288", width=5, smooth=True)
+        for p in data["obstacles"]:
+            x, y = self.map_transform(p)
+            self.minimap.create_oval(x-2, y-2, x+2, y+2, fill=AMBER, outline="")
+        self.car_dot = self.minimap.create_oval(0, 0, 6, 6, fill=ACCENT, outline=TEXT)
+
+    def _poll(self):
+        try:
+            while True:
+                event, payload = self.worker.events.get_nowait()
+                if event == "status":
+                    self.status.set(payload)
+                elif event == "error":
+                    self.started = False
+                    self.status.set(f"Lỗi: {payload}")
+                elif event == "started":
+                    self.started = True
+                    self.status.set("AI đang chạy · Model gốc có thể va chạm vì chưa học môi trường mới" if payload.driver == "AI" else "Tự lái · Click khung hình rồi dùng phím mũi tên / WASD")
+                elif event == "reset":
+                    data, seed, episode = payload
+                    self._draw_map(data)
+                    self.run_label.config(text=f"Seed {seed} · Episode {episode} · {len(data['obstacles'])} vật cản")
+                    self.seed_var.set(str(seed))
+                elif event == "finished":
+                    seed, total, info = payload
+                    self.history.insert("", 0, values=(seed, f"{total:+.1f}", info["collisions"]))
+                    for item in self.history.get_children()[30:]:
+                        self.history.delete(item)
+                    reason = REASONS.get(info.get("end_reason"), "Kết thúc lượt")
+                    self.status.set(f"{reason} · Reward {total:+.1f} · Đang chuẩn bị map tiếp theo...")
         except queue.Empty:
             pass
+        try:
+            payload = self.worker.frames.get_nowait()
+            info = payload["info"]
+            image = Image.fromarray(payload["frame"]).resize((720, 480), Image.Resampling.LANCZOS)
+            self.photo = ImageTk.PhotoImage(image)
+            if self.image_item is None:
+                self.canvas.delete("all")
+                self.image_item = self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+            else:
+                self.canvas.itemconfigure(self.image_item, image=self.photo)
+            for key, value in {"speed": f"{info['speed_kmh']:.0f}", "progress": f"{info['progress']:.0%}",
+                               "damage": f"{info['damage']}%", "hits": str(info['collisions']),
+                               "reward": f"{payload['total']:+.1f}", "action": ACTIONS[payload['action']]}.items():
+                self.stats[key].set(value)
+            if self.map_transform and self.car_dot is not None:
+                x, y = self.map_transform(info["car_position"])
+                self.minimap.coords(self.car_dot, x-3, y-3, x+3, y+3)
+        except queue.Empty:
+            pass
+        self.root.after(33, self._poll)
 
-        self.root.after(33, self._update_ui)
+    def _close(self):
+        self.worker.stop_event.set()
+        self.root.destroy()
 
 
-# ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     root = tk.Tk()
-    root.geometry("720x580")
     app = DemoApp(root)
     root.mainloop()

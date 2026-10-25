@@ -44,7 +44,9 @@ class DQNAgent:
             return self.policy_net(state_t).argmax(dim=1).item()
 
     def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+        # Frames are k/255 grayscale, so uint8 storage is lossless and 4x smaller.
+        self.memory.append((np.rint(state * 255).astype(np.uint8), action, reward,
+                            np.rint(next_state * 255).astype(np.uint8), done))
 
     def learn(self):
         if len(self.memory) < self.batch_size:
@@ -53,10 +55,10 @@ class DQNAgent:
         batch  = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        states      = torch.FloatTensor(np.array(states)).to(self.device)
+        states      = torch.from_numpy(np.array(states)).to(self.device).float() / 255.
         actions     = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards     = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        next_states = torch.from_numpy(np.array(next_states)).to(self.device).float() / 255.
         dones       = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
 
         current_q = self.policy_net(states).gather(1, actions)
@@ -98,3 +100,10 @@ class DQNAgent:
         self.epsilon  = ckpt["epsilon"]
         self.step_cnt = ckpt["step_cnt"]
         print(f"[DQNAgent] Loaded ← {path}")
+
+    def load_weights(self, path):
+        """Transfer visual driving weights, keeping a fresh optimizer/exploration."""
+        ckpt = torch.load(path, map_location=self.device)
+        self.policy_net.load_state_dict(ckpt["policy_net"])
+        self.target_net.load_state_dict(ckpt["policy_net"])
+        print(f"[DQNAgent] Warm start from {path}")
