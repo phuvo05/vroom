@@ -53,6 +53,7 @@ cleanest runs out of 30 evaluated tracks (no collisions, 90–98% of the track b
 ├── kaggle/               # Kaggle GPU training notebook
 ├── tests/                # environment and replay-memory checks
 ├── docs/media/           # demo video and GIF
+├── packaging/            # PyInstaller build of the Windows demo app
 ├── report-paper.pdf
 └── README.md
 ```
@@ -129,6 +130,49 @@ python dqn/train.py --eval <checkpoint>
 ```bash
 python dqn/demo_ui.py
 ```
+
+The demo loads `checkpoints/best.pth` by default; another checkpoint can be picked with **Chọn model .pth**.
+
+---
+
+## Windows App (no Python needed)
+
+The demo can be packaged as a standalone Windows app (`VROOM.exe`, CPU only). Anyone with the app folder and a
+trained checkpoint can run it without installing Python, PyTorch or a GPU driver.
+
+### Run the app
+
+1. Unzip `VROOM-windows.zip` and keep the whole `VROOM` folder together (`VROOM.exe` needs the `_internal` folder
+   next to it). The zip is about 220 MB and is not stored in this repository; build it as described below or get
+   it from the authors.
+2. Put the checkpoint `best.pth` in the same folder as `VROOM.exe` (or in a `checkpoints` subfolder).
+3. Double-click `VROOM.exe`. The AI starts driving the first map.
+
+```text
+VROOM/
+├── VROOM.exe
+├── best.pth        <- your checkpoint
+├── README.txt
+└── _internal/
+```
+
+- Without `best.pth`, the app shows **Chưa có model**: click **Chọn model .pth** to pick a file, or switch
+  **ĐIỀU KHIỂN** to **Tự lái** to drive yourself (click the view, arrows/WASD, Space to brake).
+- The first start can take 10–20 s.
+- The app is not code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**.
+
+### Build the app
+
+Requires Windows and [uv](https://docs.astral.sh/uv/). From the repository root in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_app.ps1
+```
+
+The script creates a separate build environment in `build\venv` with CPU-only PyTorch (to avoid bundling CUDA
+libraries) and runs PyInstaller with [packaging/vroom.spec](packaging/vroom.spec). The app is written to
+`dist\VROOM\` (about 650 MB unpacked). Zip that folder to share it; the checkpoint is never bundled. `build/` and
+`dist/` are git-ignored.
 
 ---
 

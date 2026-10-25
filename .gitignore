@@ -5,3 +5,5 @@ checkpoints/
 .venv/
 runs/
 results/
+build/
+dist/

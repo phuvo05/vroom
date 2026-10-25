@@ -12,6 +12,15 @@ from PIL import Image, ImageTk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROOT = Path(__file__).resolve().parents[1]
+# Packaged app (PyInstaller): checkpoints live next to VROOM.exe, not in the bundle.
+APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else ROOT
+
+
+def default_checkpoint():
+    for path in (APP_DIR / "best.pth", APP_DIR / "checkpoints" / "best.pth"):
+        if path.is_file():
+            return path
+    return APP_DIR / "best.pth"
 BG, CARD, PANEL = "#0b1220", "#131f30", "#1b2b40"
 TEXT, MUTED, ACCENT, AMBER, RED = "#edf3fa", "#98abc1", "#57dbc2", "#ffc575", "#ff7d87"
 SCENES = {"Rừng cây": "forest", "Đô thị": "city", "Sa mạc": "desert", "Đường gốc": "classic"}
@@ -67,7 +76,8 @@ class Simulation(threading.Thread):
         if settings.driver == "AI" and self.loaded_checkpoint != settings.checkpoint:
             self.events.put(("status", "Đang tải model..."))
             if not Path(settings.checkpoint).is_file():
-                raise FileNotFoundError("Không tìm thấy checkpoint. Chọn file .pth hoặc chuyển sang Tự lái.")
+                raise FileNotFoundError("Không tìm thấy checkpoint. Đặt best.pth cạnh ứng dụng, bấm Chọn model .pth "
+                                        "hoặc chuyển sang Tự lái.")
             import torch
             from agents.dqn_agent import DQNAgent
             torch.set_num_threads(2)
@@ -191,7 +201,7 @@ class DemoApp:
         self.driver = tk.StringVar(value="AI")
         self.seed_var = tk.StringVar(value="42")
         self.rain = tk.BooleanVar(value=False)
-        self.checkpoint = str(ROOT / "checkpoints" / "best.pth")
+        self.checkpoint = str(default_checkpoint())
         for title, variable, values, width in [("BỐI CẢNH", self.scene, list(SCENES), 13),
                                                ("ĐỘ KHÓ", self.level, list(LEVELS), 9),
                                                ("ĐIỀU KHIỂN", self.driver, ["AI", "Tự lái"], 10)]:
@@ -210,7 +220,9 @@ class DemoApp:
         self._button(controls, "Chạy map", self._start, True).pack(side="right", pady=(12, 0))
         model_row = tk.Frame(self.root, bg=BG, padx=24, pady=8)
         model_row.pack(fill="x")
-        self.model_label = self._label(model_row, "Model: best.pth · Model gốc chưa được huấn luyện né vật cản", color=AMBER, size=9)
+        model_text = (f"Model: {Path(self.checkpoint).name}" if Path(self.checkpoint).is_file()
+                      else "Chưa có model · đặt best.pth cạnh ứng dụng hoặc bấm Chọn model .pth")
+        self.model_label = self._label(model_row, model_text, color=AMBER, size=9)
         self.model_label.pack(side="left")
         tk.Button(model_row, text="Chọn model .pth", command=self._choose_model, bg=BG, fg=ACCENT,
                   relief="flat", font=("Segoe UI", 9), cursor="hand2").pack(side="right")
@@ -285,7 +297,7 @@ class DemoApp:
         self.canvas.focus_set()
 
     def _choose_model(self):
-        path = filedialog.askopenfilename(title="Chọn checkpoint", initialdir=ROOT / "checkpoints",
+        path = filedialog.askopenfilename(title="Chọn checkpoint", initialdir=APP_DIR,
                                           filetypes=[("PyTorch checkpoint", "*.pth *.pt")])
         if path:
             self.checkpoint = path
@@ -350,7 +362,7 @@ class DemoApp:
                     self.status.set(f"Lỗi: {payload}")
                 elif event == "started":
                     self.started = True
-                    self.status.set("AI đang chạy · Model gốc có thể va chạm vì chưa học môi trường mới" if payload.driver == "AI" else "Tự lái · Click khung hình rồi dùng phím mũi tên / WASD")
+                    self.status.set(f"AI đang lái · {Path(payload.checkpoint).name}" if payload.driver == "AI" else "Tự lái · Click khung hình rồi dùng phím mũi tên / WASD")
                 elif event == "reset":
                     data, seed, episode = payload
                     self._draw_map(data)
