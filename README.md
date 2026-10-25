@@ -169,6 +169,9 @@ often missed them. Two changes address this:
 
 The model was then warm-started from the first model's weights and trained for 1,500 episodes with
 [kaggle/VROOM_Kaggle_GPU.ipynb](kaggle/VROOM_Kaggle_GPU.ipynb) (see [kaggle/README.md](kaggle/README.md)).
+The 100-episode training average peaked at 279.6 at episode 1,384, which is the kept checkpoint. Logs of this
+run (per-episode metrics, curves, config, final evaluation) are in
+[dqn/logs/obstacle_forest_speed_penalty/](dqn/logs/obstacle_forest_speed_penalty/).
 
 Greedy evaluation in the forest scene, normal difficulty:
 

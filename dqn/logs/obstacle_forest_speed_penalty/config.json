@@ -1,0 +1,33 @@
+{
+  "environment": {
+    "img_size": 84,
+    "frame_stack": 4,
+    "skip_frames": 4,
+    "render_mode": "rgb_array",
+    "scenario": "forest",
+    "difficulty": "normal",
+    "weather": "dry"
+  },
+  "agent": {
+    "state_dim": [
+      4,
+      84,
+      84
+    ],
+    "action_size": 5,
+    "gamma": 0.99,
+    "lr": 0.0001,
+    "batch_size": 32,
+    "memory_size": 100000,
+    "target_update": 1000,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "epsilon_decay": 0.9999
+  },
+  "episodes": 1500,
+  "seed": 42,
+  "resume": null,
+  "warm_start": "/kaggle/input/datasets/phuuvt/vroom-obstacle-checkpoint/best.pth",
+  "max_minutes": null,
+  "save_seconds": 120.0
+}

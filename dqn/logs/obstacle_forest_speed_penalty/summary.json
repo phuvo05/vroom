@@ -1,0 +1,10 @@
+{
+  "completed_episodes": 1500,
+  "optimizer_steps": 261067,
+  "elapsed_seconds": 14209.987014196999,
+  "stopped_early": false,
+  "scenario": "forest",
+  "difficulty": "normal",
+  "weather": "dry",
+  "epsilon": 0.05
+}
